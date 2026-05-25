@@ -169,25 +169,31 @@ with tab3:
         if best_win_data is None:
             st.warning(f"No best window data for {universe_name}")
             continue
+        # Check if forward return exists (old JSON may not have it)
+        if "forward_return_21d" not in best_win_data:
+            st.info(f"Backtest data not available for {universe_name}. Please re‑run `train.py` to generate forward return information.")
+            continue
         best_win = best_win_data["window"]
         best_fwd_ret = best_win_data.get("forward_return_21d")
-        if best_fwd_ret is None:
-            best_fwd_ret_str = "N/A"
-        else:
-            best_fwd_ret_str = f"{best_fwd_ret:.2%}"
+        best_fwd_ret_str = f"{best_fwd_ret:.2%}" if best_fwd_ret is not None else "N/A"
         st.markdown(f"### {universe_name.replace('_', ' ').title()}")
         st.markdown(f"**Best window:** {best_win} days → **Avg 21d return of top 3 ETFs:** {best_fwd_ret_str}")
         # Show all windows table
         rows = []
         for wd in uni_data["all_windows"]:
+            if "signal_date" not in wd or "forward_return_21d" not in wd:
+                # Skip this window if missing backtest keys (old JSON)
+                continue
             fwd = wd.get("forward_return_21d")
             rows.append({
                 "Window (days)": wd["window"],
                 "Signal Date": wd["signal_date"],
                 "21d Forward Return": f"{fwd:.2%}" if fwd is not None else "N/A"
             })
-        df_backtest = pd.DataFrame(rows)
-        st.dataframe(df_backtest, use_container_width=True)
-
+        if rows:
+            df_backtest = pd.DataFrame(rows)
+            st.dataframe(df_backtest, use_container_width=True)
+        else:
+            st.info("No backtest data available for this universe. Please re‑run `train.py` with the updated version.")
 st.sidebar.markdown("---")
 st.sidebar.caption("Noncommutative Harmonic Analysis | Fourier transform on S₃ for ETF returns")
