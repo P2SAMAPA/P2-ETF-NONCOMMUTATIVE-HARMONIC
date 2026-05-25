@@ -1,6 +1,6 @@
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 from huggingface_hub import HfApi
@@ -16,29 +16,45 @@ def normalize_scores(score_dict):
     norm = (scores - min_s) / (max_s - min_s)
     return {ticker: float(norm[i]) for i, ticker in enumerate(score_dict.keys())}
 
-def compute_forward_return(returns_df, signal_idx, top3_tickers, horizon=21):
+def compute_forward_return(returns_df, signal_date, top3_tickers, horizon=21):
     """
     Compute average cumulative return of top3 ETFs over next `horizon` days.
-    returns_df: DataFrame with datetime index
-    signal_idx: integer index of the signal day (last day of the window)
+    returns_df: DataFrame with datetime index.
+    signal_date: datetime of the signal.
     """
+    # Find the position of signal_date in the index
+    if signal_date not in returns_df.index:
+        # If not found, return None
+        return None
+    signal_idx = returns_df.index.get_loc(signal_date)
     if signal_idx + horizon >= len(returns_df):
         return None
     future_returns = returns_df.iloc[signal_idx+1:signal_idx+horizon+1]
-    cum_ret = (1 + future_returns).prod() - 1  # cumulative return per ETF
+    if future_returns.empty:
+        return None
+    cum_ret = (1 + future_returns).prod() - 1
     top3_cum = [cum_ret[t] for t in top3_tickers if t in cum_ret.index]
     if not top3_cum:
         return None
     return float(np.mean(top3_cum))
 
-def run_for_window(returns, window_days, full_returns_df):
-    """Process one rolling window: compute scores and forward return."""
+def run_for_window(returns, window_days, full_returns_df, horizon=21):
+    """
+    Process one rolling window: compute scores and forward return.
+    Returns None if no forward return possible (window ends too close to end).
+    """
     if len(returns) < window_days:
         return None
-    ret_window = returns.iloc[-window_days:]
-    signal_date = ret_window.index[-1]
+    # Only consider windows that leave enough future data
+    signal_date = returns.index[-1]
+    if signal_date not in full_returns_df.index:
+        return None
     signal_idx = full_returns_df.index.get_loc(signal_date)
+    if signal_idx + horizon >= len(full_returns_df):
+        # Not enough future data, skip this window
+        return None
 
+    ret_window = returns.iloc[-window_days:]
     try:
         raw_scores = noncommutative_harmonic_scores(ret_window)
     except Exception as e:
@@ -51,8 +67,7 @@ def run_for_window(returns, window_days, full_returns_df):
     top3_norm = [s for _, s in sorted_norm[:config.TOP_N]]
     top3_raw = [raw_scores[t] for t in top3_tickers]
 
-    # Forward return (21 days)
-    forward_ret = compute_forward_return(full_returns_df, signal_idx, top3_tickers, horizon=21)
+    forward_ret = compute_forward_return(full_returns_df, signal_date, top3_tickers, horizon)
 
     top_etfs = [{"ticker": t, "harmonic_score_norm": s_norm, "raw_score": s_raw}
                 for t, s_norm, s_raw in zip(top3_tickers, top3_norm, top3_raw)]
@@ -86,7 +101,7 @@ def main():
         best_data = None
         for w in config.WINDOWS:
             print(f"  Window {w} days")
-            out = run_for_window(returns, w, returns)  # pass full returns for index
+            out = run_for_window(returns, w, returns, horizon=21)
             if out:
                 all_window_results.append(out)
                 if out["forward_return_21d"] is not None and out["forward_return_21d"] > best_forward_ret:
@@ -94,7 +109,7 @@ def main():
                     best_window = w
                     best_data = out
             else:
-                print(f"    Failed for window {w}")
+                print(f"    Skipped (insufficient future data) or failed")
         results["universes"][uni_name] = {
             "best_window_by_forward_return": best_window,
             "best_window_data": best_data,
