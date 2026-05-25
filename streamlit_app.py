@@ -107,7 +107,7 @@ def display_universe(universe_name, uni_data, window_data, window_label):
         df_full = df_full.sort_values("Normalized Fourier Norm", ascending=False)
         st.dataframe(df_full, use_container_width=True)
 
-tab1, tab2, tab3 = st.tabs(["📊 Best Window (Auto)", "🔍 Choose Window (Manual)", "📈 Backtest"])
+tab1, tab2, tab3 = st.tabs(["📊 Best Window (Auto)", "🔍 Choose Window (Manual)", "📈 Walk‑Forward Backtest"])
 
 with tab1:
     st.header("🔊 Top ETFs by Noncommutative Fourier Norm (Auto Best Window)")
@@ -118,7 +118,7 @@ with tab1:
         - The Fourier coefficient at the 2‑dimensional irreducible representation is a 2×2 complex matrix.
         - The **Frobenius norm** of this matrix measures non‑commutative structure.
         - Higher norm = stronger non‑abelian signal – potentially more complex, exploitable patterns.
-        - The best window is automatically selected as the one with the highest forward 21‑day return (if available), otherwise the longest window.
+        - The best window is automatically selected as the one with the highest **average next‑day return** from the walk‑forward backtest.
         """)
     for universe_name, uni_data in data["universes"].items():
         if not uni_data or not uni_data.get("all_windows"):
@@ -151,70 +151,53 @@ with tab2:
             st.warning("No data for selected window.")
 
 with tab3:
-    st.header("📈 Backtest: Forward 21‑Day Return of Top 3 ETFs")
+    st.header("📈 Walk‑Forward Backtest")
     st.markdown("""
-    For each rolling window length, we rank ETFs by the raw Fourier norm, select the top 3,
-    and compute their **average cumulative return** over the next 21 trading days.
-    The table below shows the best window per universe (by highest forward return).
+    For each rolling window length, we simulate a **daily walk‑forward**:
+    - On each day, compute the Fourier norm using the trailing `window` days.
+    - Rank ETFs and select the top 3.
+    - Record the **next day's return** of those ETFs.
+    - The backtest result is the **average of these next‑day returns** across all days.
+    This is a true out‑of‑sample performance metric.
     """)
 
-    # Check if any universe has backtest data
+    # Check if any backtest data exists
     has_backtest = False
     for uni_data in data["universes"].values():
         if uni_data and uni_data.get("all_windows"):
             for wd in uni_data["all_windows"]:
-                if "forward_return_21d" in wd and wd["forward_return_21d"] is not None:
+                if "backtest_avg_next_return" in wd and wd["backtest_avg_next_return"] is not None:
                     has_backtest = True
                     break
         if has_backtest:
             break
 
     if not has_backtest:
-        st.info("⚠️ **Backtest data not available in the current results.**\n\n"
-                "Please re‑run `train.py` with the latest version (which includes forward return computation) and upload the new JSON file. "
-                "Once that's done, this tab will show the backtest performance.")
-        # Show available windows without forward returns (for reference)
-        for universe_name, uni_data in data["universes"].items():
-            if uni_data and uni_data.get("all_windows"):
-                rows = []
-                for wd in uni_data["all_windows"]:
-                    rows.append({
-                        "Window (days)": wd["window"],
-                        "Signal Date": wd.get("signal_date", "N/A"),
-                        "21d Forward Return": "N/A (run new training)"
-                    })
-                if rows:
-                    st.markdown(f"### {universe_name.replace('_', ' ').title()} (no backtest data)")
-                    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        st.info("⚠️ **Backtest data not available.**\n\n"
+                "Please re‑run `train.py` with the latest version that includes walk‑forward backtest.")
     else:
         for universe_name, uni_data in data["universes"].items():
             if not uni_data or not uni_data.get("all_windows"):
                 continue
-            # Find best by forward return
-            best_win_data = None
-            best_fwd = -np.inf
-            for wd in uni_data["all_windows"]:
-                fwd = wd.get("forward_return_21d")
-                if fwd is not None and fwd > best_fwd:
-                    best_fwd = fwd
-                    best_win_data = wd
-            if best_win_data is None:
-                st.warning(f"No backtest data for {universe_name}")
-                continue
-            best_win = best_win_data["window"]
-            best_fwd_str = f"{best_fwd:.2%}" if best_fwd != -np.inf else "N/A"
-            st.markdown(f"### {universe_name.replace('_', ' ').title()}")
-            st.markdown(f"**Best window:** {best_win} days → **Avg 21d return:** {best_fwd_str}")
+            # Build table of backtest results for all windows
             rows = []
             for wd in uni_data["all_windows"]:
-                fwd = wd.get("forward_return_21d")
+                avg_ret = wd.get("backtest_avg_next_return")
                 rows.append({
                     "Window (days)": wd["window"],
-                    "Signal Date": wd.get("signal_date", "N/A"),
-                    "21d Forward Return": f"{fwd:.2%}" if fwd is not None else "N/A"
+                    "Avg next-day return (%)": f"{avg_ret*100:.4f}%" if avg_ret is not None else "N/A"
                 })
-            if rows:
-                st.dataframe(pd.DataFrame(rows), use_container_width=True)
+            df_bt = pd.DataFrame(rows)
+            st.subheader(universe_name.replace("_", " ").title())
+            st.dataframe(df_bt, use_container_width=True)
+            
+            # Highlight best window
+            best_win = uni_data.get("best_window_by_backtest")
+            if best_win is not None:
+                best_avg = next((wd["backtest_avg_next_return"] for wd in uni_data["all_windows"] if wd["window"] == best_win), None)
+                if best_avg is not None:
+                    st.success(f"**Best window:** {best_win} days → Avg next-day return = {best_avg*100:.4f}%")
+            st.markdown("---")
 
 st.sidebar.markdown("---")
 st.sidebar.caption("Noncommutative Harmonic Analysis | Fourier transform on S₃ for ETF returns")
