@@ -18,13 +18,12 @@ def normalize_scores(score_dict):
 
 def rolling_walkforward_backtest(returns_df, window_days, top_n=3):
     """
-    For each possible day t (where we have window_days of history and at least one next day),
-    compute scores on the window ending at t, pick top_n ETFs, and record their next day return.
-    Returns: average next-day return of top_n ETFs across all signals.
+    Returns a dictionary: for each ETF, the average next-day return when it was among the top_n.
     """
     n = len(returns_df)
-    all_next_returns = []
-    # We need at least window_days + 1 rows
+    sum_returns = {}
+    count = {}
+    
     for t in range(window_days, n - 1):
         window = returns_df.iloc[t - window_days : t]
         next_day = returns_df.iloc[t]
@@ -35,20 +34,23 @@ def rolling_walkforward_backtest(returns_df, window_days, top_n=3):
         norm_scores = normalize_scores(raw_scores)
         sorted_etfs = sorted(norm_scores.items(), key=lambda x: x[1], reverse=True)
         top_etfs = [ticker for ticker, _ in sorted_etfs[:top_n]]
-        next_returns = [next_day[t] for t in top_etfs if t in next_day.index]
-        if next_returns:
-            all_next_returns.extend(next_returns)
-    if not all_next_returns:
-        return None
-    return float(np.mean(all_next_returns))
+        
+        for ticker in top_etfs:
+            ret = next_day[ticker]
+            sum_returns[ticker] = sum_returns.get(ticker, 0.0) + ret
+            count[ticker] = count.get(ticker, 0) + 1
+    
+    avg_returns = {}
+    for ticker in sum_returns:
+        avg_returns[ticker] = sum_returns[ticker] / count[ticker]
+    return avg_returns
 
 def run_for_window(returns, window_days):
     if len(returns) < window_days + 1:
         return None
+    # Final window (for display of current scores)
+    ret_window = returns.iloc[-window_days:]
     try:
-        # For the "best window" by score (original method), we compute scores on the last window
-        # and produce a dictionary of scores for display.
-        ret_window = returns.iloc[-window_days:]
         raw_scores = noncommutative_harmonic_scores(ret_window)
         norm_scores = normalize_scores(raw_scores)
         sorted_norm = sorted(norm_scores.items(), key=lambda x: x[1], reverse=True)
@@ -57,15 +59,15 @@ def run_for_window(returns, window_days):
         print(f"    Error computing scores: {e}")
         return None
 
-    # Backtest: average next-day return of top 3 over the entire history
-    avg_return = rolling_walkforward_backtest(returns, window_days, top_n=config.TOP_N)
+    # Backtest: per‑ETF average next‑day return when in top 3
+    backtest_per_etf = rolling_walkforward_backtest(returns, window_days, top_n=config.TOP_N)
 
     return {
         "window": window_days,
         "top_etfs": top_etfs,
         "all_scores_raw": raw_scores,
         "all_scores_norm": norm_scores,
-        "backtest_avg_next_return": avg_return
+        "backtest_per_etf_avg_return": backtest_per_etf
     }
 
 def main():
@@ -83,7 +85,8 @@ def main():
             print("  No data -> skipping")
             continue
         all_window_results = []
-        best_avg_ret = -np.inf
+        # We'll also compute the best window based on the highest average backtest return among all ETFs
+        best_window_score = -np.inf
         best_window = None
         best_data = None
         for w in config.WINDOWS:
@@ -91,10 +94,14 @@ def main():
             out = run_for_window(returns, w)
             if out:
                 all_window_results.append(out)
-                if out["backtest_avg_next_return"] is not None and out["backtest_avg_next_return"] > best_avg_ret:
-                    best_avg_ret = out["backtest_avg_next_return"]
-                    best_window = w
-                    best_data = out
+                # For ranking windows, we compute the average across all ETFs' backtest returns
+                bt_vals = list(out["backtest_per_etf_avg_return"].values()) if out["backtest_per_etf_avg_return"] else []
+                if bt_vals:
+                    avg_bt = np.mean(bt_vals)
+                    if avg_bt > best_window_score:
+                        best_window_score = avg_bt
+                        best_window = w
+                        best_data = out
             else:
                 print(f"    Failed for window {w}")
         results["universes"][uni_name] = {
