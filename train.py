@@ -1,6 +1,6 @@
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 import numpy as np
 import pandas as pd
 from huggingface_hub import HfApi
@@ -16,64 +16,54 @@ def normalize_scores(score_dict):
     norm = (scores - min_s) / (max_s - min_s)
     return {ticker: float(norm[i]) for i, ticker in enumerate(score_dict.keys())}
 
-def compute_forward_return(returns_df, signal_date, top3_tickers, horizon=21):
+def compute_forward_return(returns_df, signal_idx, top3_tickers, horizon=21):
     """
-    Given the full returns DataFrame (index=datetime), a signal date, and list of top3 tickers,
-    compute the average cumulative return over the next `horizon` trading days.
-    Returns float (average cumulative return).
+    Compute average cumulative return of top3 ETFs over next `horizon` days.
+    returns_df: DataFrame with datetime index
+    signal_idx: integer index of the signal day (last day of the window)
     """
-    # Find the position of signal_date in the index
-    if signal_date not in returns_df.index:
-        # If exact date not found, take the next available date after signal_date
-        idx = returns_df.index.searchsorted(signal_date)
-        if idx >= len(returns_df):
-            return np.nan
-        signal_date = returns_df.index[idx]
-    signal_idx = returns_df.index.get_loc(signal_date)
-    end_idx = min(signal_idx + horizon, len(returns_df) - 1)
-    if end_idx <= signal_idx:
-        return np.nan
-    # Cumulative returns from signal_date+1 to end_idx
-    future_returns = returns_df.iloc[signal_idx+1:end_idx+1]
-    if future_returns.empty:
-        return np.nan
-    cum_returns = (1 + future_returns).prod() - 1  # per ETF
-    top3_returns = [cum_returns[t] for t in top3_tickers if t in cum_returns.index]
-    if not top3_returns:
-        return np.nan
-    return np.mean(top3_returns)
+    if signal_idx + horizon >= len(returns_df):
+        return None
+    future_returns = returns_df.iloc[signal_idx+1:signal_idx+horizon+1]
+    cum_ret = (1 + future_returns).prod() - 1  # cumulative return per ETF
+    top3_cum = [cum_ret[t] for t in top3_tickers if t in cum_ret.index]
+    if not top3_cum:
+        return None
+    return float(np.mean(top3_cum))
 
-def run_for_window(returns, window_days, returns_full):
-    """
-    Compute scores and forward returns for one window.
-    """
+def run_for_window(returns, window_days, full_returns_df):
+    """Process one rolling window: compute scores and forward return."""
     if len(returns) < window_days:
         return None
     ret_window = returns.iloc[-window_days:]
-    signal_date = ret_window.index[-1]  # last day of window
+    signal_date = ret_window.index[-1]
+    signal_idx = full_returns_df.index.get_loc(signal_date)
+
     try:
         raw_scores = noncommutative_harmonic_scores(ret_window)
     except Exception as e:
         print(f"    Error: {e}")
         return None
+
     norm_scores = normalize_scores(raw_scores)
     sorted_norm = sorted(norm_scores.items(), key=lambda x: x[1], reverse=True)
     top3_tickers = [t for t, _ in sorted_norm[:config.TOP_N]]
-    top3_norm_scores = [s for _, s in sorted_norm[:config.TOP_N]]
-    top3_raw_scores = [raw_scores[t] for t in top3_tickers]
+    top3_norm = [s for _, s in sorted_norm[:config.TOP_N]]
+    top3_raw = [raw_scores[t] for t in top3_tickers]
 
-    # Forward return (backtest)
-    forward_ret = compute_forward_return(returns_full, signal_date, top3_tickers, horizon=21)
+    # Forward return (21 days)
+    forward_ret = compute_forward_return(full_returns_df, signal_idx, top3_tickers, horizon=21)
 
     top_etfs = [{"ticker": t, "harmonic_score_norm": s_norm, "raw_score": s_raw}
-                for t, s_norm, s_raw in zip(top3_tickers, top3_norm_scores, top3_raw_scores)]
+                for t, s_norm, s_raw in zip(top3_tickers, top3_norm, top3_raw)]
+
     return {
         "window": window_days,
         "signal_date": signal_date.strftime("%Y-%m-%d"),
         "top_etfs": top_etfs,
         "all_scores_raw": raw_scores,
         "all_scores_norm": norm_scores,
-        "forward_return_21d": forward_ret if not np.isnan(forward_ret) else None
+        "forward_return_21d": forward_ret
     }
 
 def main():
@@ -96,7 +86,7 @@ def main():
         best_data = None
         for w in config.WINDOWS:
             print(f"  Window {w} days")
-            out = run_for_window(returns, w, returns)  # pass full returns for forward calc
+            out = run_for_window(returns, w, returns)  # pass full returns for index
             if out:
                 all_window_results.append(out)
                 if out["forward_return_21d"] is not None and out["forward_return_21d"] > best_forward_ret:
@@ -105,8 +95,6 @@ def main():
                     best_data = out
             else:
                 print(f"    Failed for window {w}")
-        # Also keep best by raw score magnitude (optional)
-        # We'll store both
         results["universes"][uni_name] = {
             "best_window_by_forward_return": best_window,
             "best_window_data": best_data,
