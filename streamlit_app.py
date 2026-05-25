@@ -107,7 +107,7 @@ def display_universe(universe_name, uni_data, window_data, window_label):
         df_full = df_full.sort_values("Normalized Fourier Norm", ascending=False)
         st.dataframe(df_full, use_container_width=True)
 
-tab1, tab2, tab3 = st.tabs(["📊 Best Window (Auto)", "🔍 Choose Window (Manual)", "📈 Backtest + ETFs"])
+tab1, tab2, tab3 = st.tabs(["📊 Best Window (Auto)", "🔍 Choose Window (Manual)", "📈 Backtest (Per‑ETF)"])
 
 with tab1:
     st.header("🔊 Top ETFs by Noncommutative Fourier Norm (Auto Best Window)")
@@ -118,7 +118,7 @@ with tab1:
         - The Fourier coefficient at the 2‑dimensional irreducible representation is a 2×2 complex matrix.
         - The **Frobenius norm** of this matrix measures non‑commutative structure.
         - Higher norm = stronger non‑abelian signal – potentially more complex, exploitable patterns.
-        - The best window is automatically selected as the one with the highest **average next‑day return** from the walk‑forward backtest.
+        - The best window is automatically selected as the one with the highest **average backtest return** (average across all ETFs' per‑ETF averages).
         """)
     for universe_name, uni_data in data["universes"].items():
         if not uni_data or not uni_data.get("all_windows"):
@@ -151,89 +151,63 @@ with tab2:
             st.warning("No data for selected window.")
 
 with tab3:
-    st.header("📈 Walk‑Forward Backtest + ETF Selection")
+    st.header("📈 Walk‑Forward Backtest (Per‑ETF Average Next‑Day Return)")
     st.markdown("""
-    For each rolling window length, we simulate a **daily walk‑forward**:
-    - On each day, compute the Fourier norm using the trailing `window` days.
-    - Rank ETFs and select the top 3.
-    - Record the **next day's return** of those ETFs.
-    - The backtest result is the **average of these next‑day returns** across all days.
+    **Method:**  
+    For each window length, we simulate a daily walk‑forward:
+    - On each day, compute the Fourier norm for all ETFs (trailing window).
+    - Select the top 3 ETFs by Fourier norm.
+    - Record the **next day's return** for each selected ETF individually.
+    - For each ETF, we compute the **average** of those next‑day returns across all days it was selected.
+    
+    **The table below shows, for each universe and window, the top 3 ETFs by that average backtest return.**  
+    (This tells you which specific ETFs have historically performed well when the signal selected them.)
     """)
-
-    # Check if any backtest data exists
-    has_backtest = False
-    for uni_data in data["universes"].values():
-        if uni_data and uni_data.get("all_windows"):
-            for wd in uni_data["all_windows"]:
-                if "backtest_avg_next_return" in wd and wd["backtest_avg_next_return"] is not None:
-                    has_backtest = True
-                    break
-        if has_backtest:
-            break
-
-    if not has_backtest:
-        st.info("⚠️ **Backtest data not available.**\n\n"
-                "Please re‑run `train.py` with the latest version that includes walk‑forward backtest.")
-    else:
-        for universe_name, uni_data in data["universes"].items():
-            if not uni_data or not uni_data.get("all_windows"):
+    
+    for universe_name, uni_data in data["universes"].items():
+        if not uni_data or not uni_data.get("all_windows"):
+            continue
+        
+        st.subheader(universe_name.replace("_", " ").title())
+        
+        rows = []
+        for wd in uni_data["all_windows"]:
+            w = wd["window"]
+            backtest_dict = wd.get("backtest_per_etf_avg_return", {})
+            if not backtest_dict:
                 continue
-            st.subheader(universe_name.replace("_", " ").title())
-            
-            # Select window for this universe
+            # Sort by backtest average (descending) and take top 3
+            sorted_by_backtest = sorted(backtest_dict.items(), key=lambda x: x[1], reverse=True)[:config.TOP_N]
+            for ticker, avg_ret in sorted_by_backtest:
+                rows.append({
+                    "Window (days)": w,
+                    "Ticker": ticker,
+                    "Avg next‑day return (%)": f"{avg_ret*100:.4f}%"
+                })
+        if rows:
+            df_backtest = pd.DataFrame(rows)
+            st.dataframe(df_backtest, use_container_width=True)
+        else:
+            st.info("No backtest data available for this universe.")
+        
+        # Optional: show full detail for a selected window
+        with st.expander(f"See full Fourier‑based rankings for a specific window (original signal)"):
             available_windows = [wd["window"] for wd in uni_data["all_windows"]]
-            sel_win = st.selectbox(f"Select window for {universe_name.replace('_', ' ').title()}", available_windows, key=f"backtest_win_{universe_name}")
+            sel_win = st.selectbox(f"Select window for {universe_name.replace('_', ' ').title()}", available_windows, key=f"backtest_detail_{universe_name}")
             win_data = next((wd for wd in uni_data["all_windows"] if wd["window"] == sel_win), None)
-            
             if win_data:
-                # Display backtest metric
-                avg_ret = win_data.get("backtest_avg_next_return")
-                if avg_ret is not None:
-                    st.metric("Average next-day return (backtest)", f"{avg_ret*100:.4f}%")
-                else:
-                    st.warning("Backtest data not available for this window.")
-                
-                # Display top 3 ETFs for this window (same as in Tab 2)
-                top3 = win_data["top_etfs"]
-                norm_scores = win_data["all_scores_norm"]
-                raw_scores = win_data["all_scores_raw"]
-                
-                st.markdown("### Top 3 ETFs for this window")
+                st.markdown("**Top 3 by Fourier norm (original signal)**")
+                top3_fourier = win_data["top_etfs"]
                 cols = st.columns(3)
-                for idx, etf in enumerate(top3):
+                for idx, etf in enumerate(top3_fourier):
                     with cols[idx]:
                         st.markdown(f"""
-                        <div style="background: #f0f2f6; padding: 1rem; border-radius: 0.5rem; text-align: center;">
-                            <h3>{etf['ticker']}</h3>
-                            <p>Fourier norm: {etf['harmonic_score_norm']:.3f}</p>
-                            <p style="font-size:0.8rem;">raw: {etf['raw_score']:.4f}</p>
+                        <div style="background: #f0f2f6; padding: 0.5rem; border-radius: 0.5rem; text-align: center;">
+                            <b>{etf['ticker']}</b><br>
+                            Fourier norm: {etf['harmonic_score_norm']:.3f}<br>
+                            raw: {etf['raw_score']:.4f}
                         </div>
                         """, unsafe_allow_html=True)
-                
-                with st.expander(f"Full ranking for {universe_name} (window {sel_win}d)"):
-                    df_full = pd.DataFrame(list(norm_scores.items()), columns=["Ticker", "Normalized Fourier Norm"])
-                    df_full["Raw Score"] = df_full["Ticker"].apply(lambda t: raw_scores[t])
-                    df_full = df_full.sort_values("Normalized Fourier Norm", ascending=False)
-                    st.dataframe(df_full, use_container_width=True)
-            
-            # Show table of all windows' backtest returns for reference
-            rows = []
-            for wd in uni_data["all_windows"]:
-                avg_ret = wd.get("backtest_avg_next_return")
-                rows.append({
-                    "Window (days)": wd["window"],
-                    "Avg next-day return (%)": f"{avg_ret*100:.4f}%" if avg_ret is not None else "N/A"
-                })
-            df_bt = pd.DataFrame(rows)
-            st.markdown("### Backtest results for all windows")
-            st.dataframe(df_bt, use_container_width=True)
-            
-            best_win = uni_data.get("best_window_by_backtest")
-            if best_win is not None:
-                best_avg = next((wd["backtest_avg_next_return"] for wd in uni_data["all_windows"] if wd["window"] == best_win), None)
-                if best_avg is not None:
-                    st.success(f"**Best window:** {best_win} days → Avg next-day return = {best_avg*100:.4f}%")
-            st.markdown("---")
 
 st.sidebar.markdown("---")
 st.sidebar.caption("Noncommutative Harmonic Analysis | Fourier transform on S₃ for ETF returns")
