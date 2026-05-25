@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import json
 from huggingface_hub import HfFileSystem
 import config
@@ -85,7 +86,6 @@ if "error" in data:
 st.session_state['run_date'] = data['run_date']
 
 def display_universe(universe_name, uni_data, window_data, window_label):
-    """Generic display function for a given window's data."""
     top3 = window_data["top_etfs"]
     norm_scores = window_data["all_scores_norm"]
     raw_scores = window_data["all_scores_raw"]
@@ -107,7 +107,6 @@ def display_universe(universe_name, uni_data, window_data, window_label):
         df_full = df_full.sort_values("Normalized Fourier Norm", ascending=False)
         st.dataframe(df_full, use_container_width=True)
 
-# Create three tabs
 tab1, tab2, tab3 = st.tabs(["📊 Best Window (Auto)", "🔍 Choose Window (Manual)", "📈 Backtest"])
 
 with tab1:
@@ -115,9 +114,9 @@ with tab1:
     with st.expander("📖 Interpretation", expanded=False):
         st.markdown("""
         - **Noncommutative harmonic analysis** generalises Fourier transform to functions on non‑abelian groups.
-        - We map each ETF's return series to a function on the permutation group S₃ (6 elements) via quantisation.
+        - We map each ETF's return series to a function on the permutation group S₃ (6 elements) via quantiles, weighted by return magnitude.
         - The Fourier coefficient at the 2‑dimensional irreducible representation is a 2×2 complex matrix.
-        - The **Frobenius norm** of this matrix measures how much the distribution of returns aligns with non‑commutative structure.
+        - The **Frobenius norm** of this matrix measures non‑commutative structure.
         - Higher norm = stronger non‑abelian signal – potentially more complex, exploitable patterns.
         - The best window is automatically selected as the one with the highest forward 21‑day return (if available), otherwise the longest window.
         """)
@@ -125,10 +124,9 @@ with tab1:
         if not uni_data or not uni_data.get("all_windows"):
             st.warning(f"No window data for {universe_name}")
             continue
-        # Try to get best_window_data, else fallback to first window
         best_data = uni_data.get("best_window_data")
         if best_data is None and uni_data["all_windows"]:
-            best_data = uni_data["all_windows"][0]  # fallback to first window
+            best_data = uni_data["all_windows"][-1]  # fallback to longest window
             win_label = f"window {best_data['window']}d (fallback)"
         elif best_data:
             win_label = f"best window {best_data['window']}d"
@@ -159,23 +157,38 @@ with tab3:
     and compute their **average cumulative return** over the next 21 trading days.
     The table below shows the best window per universe (by highest forward return).
     """)
+
     # Check if any universe has backtest data
-    has_backtest_data = False
-    for universe_name, uni_data in data["universes"].items():
+    has_backtest = False
+    for uni_data in data["universes"].values():
         if uni_data and uni_data.get("all_windows"):
             for wd in uni_data["all_windows"]:
                 if "forward_return_21d" in wd and wd["forward_return_21d"] is not None:
-                    has_backtest_data = True
+                    has_backtest = True
                     break
-        if has_backtest_data:
+        if has_backtest:
             break
 
-    if not has_backtest_data:
-        st.info("No backtest data found. Please re‑run `train.py` with the latest version that includes forward return computation, then upload the new results.")
+    if not has_backtest:
+        st.info("⚠️ **Backtest data not available in the current results.**\n\n"
+                "Please re‑run `train.py` with the latest version (which includes forward return computation) and upload the new JSON file. "
+                "Once that's done, this tab will show the backtest performance.")
+        # Show available windows without forward returns (for reference)
+        for universe_name, uni_data in data["universes"].items():
+            if uni_data and uni_data.get("all_windows"):
+                rows = []
+                for wd in uni_data["all_windows"]:
+                    rows.append({
+                        "Window (days)": wd["window"],
+                        "Signal Date": wd.get("signal_date", "N/A"),
+                        "21d Forward Return": "N/A (run new training)"
+                    })
+                if rows:
+                    st.markdown(f"### {universe_name.replace('_', ' ').title()} (no backtest data)")
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True)
     else:
         for universe_name, uni_data in data["universes"].items():
             if not uni_data or not uni_data.get("all_windows"):
-                st.warning(f"No window data for {universe_name}")
                 continue
             # Find best by forward return
             best_win_data = None
@@ -191,21 +204,17 @@ with tab3:
             best_win = best_win_data["window"]
             best_fwd_str = f"{best_fwd:.2%}" if best_fwd != -np.inf else "N/A"
             st.markdown(f"### {universe_name.replace('_', ' ').title()}")
-            st.markdown(f"**Best window:** {best_win} days → **Avg 21d return of top 3 ETFs:** {best_fwd_str}")
-            # Show all windows table
+            st.markdown(f"**Best window:** {best_win} days → **Avg 21d return:** {best_fwd_str}")
             rows = []
             for wd in uni_data["all_windows"]:
                 fwd = wd.get("forward_return_21d")
-                if fwd is None:
-                    continue
                 rows.append({
                     "Window (days)": wd["window"],
                     "Signal Date": wd.get("signal_date", "N/A"),
                     "21d Forward Return": f"{fwd:.2%}" if fwd is not None else "N/A"
                 })
             if rows:
-                df_backtest = pd.DataFrame(rows)
-                st.dataframe(df_backtest, use_container_width=True)
+                st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
 st.sidebar.markdown("---")
 st.sidebar.caption("Noncommutative Harmonic Analysis | Fourier transform on S₃ for ETF returns")
